@@ -325,6 +325,8 @@ static int bind_multibytes(sqlite3 *db, sqlite3_stmt *stmt, const void *data, ui
 	return 0;
 }
 
+// empty char
+const char *empty = "\0";
 */
 import "C"
 
@@ -1008,7 +1010,7 @@ func (s *Stmt) BindMultibytes(v []byte, pos []uint32, size int, colcount int) er
 // require an empty but non-NULL value.
 func (s *Stmt) BindEmptyString(count int) error {
 	var rc C.int
-	rc = C.bind_text(s.stmt, C.int(count+1), empty, C.int(0), 1)
+	rc = C.bind_text(s.stmt, C.int(count+1), C.empty, C.int(0), 1)
 	if rc != OK {
 		return errStr(rc)
 	}
