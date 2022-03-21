@@ -58,6 +58,8 @@ package sqlite3
 // Fix "_localtime32(0): not defined" linker error.
 #cgo windows,386 CFLAGS: -D_localtime32=localtime
 
+// needed for uint32_t
+#include <stdint.h>
 #include <assert.h>
 #include <pthread.h>
 #include "sqlite3.h"
@@ -238,6 +240,91 @@ int sqlite3_blocking_prepare_v2(
 	}
     return rc;
 }
+
+// This function is a wrapper around the SQLite function sqlite3_prepare_v3().
+// Its prepFlag is set to SQLITE_PREPARE_PERSISTENT.
+// It functions in the same way as prepare_v3(), except that if a required
+// shared-cache lock cannot be obtained, this function may block waiting for
+// the lock to become available. In this scenario the normal API prepare_v2()
+// function always returns SQLITE_LOCKED.
+//
+// If this function returns SQLITE_LOCKED, the caller should rollback
+// the current transaction (if any) and try again later. Otherwise, the
+// system may become deadlocked.
+int sqlite3_blocking_prepare_v3_persistent(
+  sqlite3 *db,              // Database handle.
+  const char *zSql,         // UTF-8 encoded SQL statement.
+  int nSql,                 // Length of zSql in bytes.
+  sqlite3_stmt **ppStmt,    // OUT: A pointer to the prepared statement
+  const char **pz           // OUT: End of parsed string
+){
+	int rc;
+	for (;;) {
+		rc = sqlite3_prepare_v3(db, zSql, nSql, SQLITE_PREPARE_PERSISTENT, ppStmt, pz);
+		if( rc != SQLITE_LOCKED ){
+			break;
+		}
+        if( sqlite3_extended_errcode(db) != SQLITE_LOCKED_SHAREDCACHE ) {
+            break;
+        }
+        rc = wait_for_unlock_notify(db);
+        if( rc!=SQLITE_OK ) {
+			break;
+		}
+	}
+    return rc;
+}
+
+// Bind all values from a prepared statement from a byte array in a single C call.
+// Pads zero columns for the missing columns in the byte array.
+// At the end of the call it steps through the statement to save another few calls.
+static int bind_multibytes(sqlite3 *db, sqlite3_stmt *stmt, const void *data, uint32_t *pos, int size, int colcount) {
+	int prev = 0;
+	int rc;
+	for(int i=0 ; i<size ; i++) {
+		if (pos[i] > 0) {
+			rc = sqlite3_bind_blob(stmt, i+1, data+prev, pos[i], SQLITE_STATIC);
+
+			if (rc > 0) {
+				return rc;
+			}
+		} else {
+			rc = sqlite3_bind_zeroblob(stmt, i, 0);
+			if (rc > 0) {
+				return rc;
+			}
+		}
+		prev += pos[i];
+	}
+
+	if (size < colcount) {
+		for(int i=0; i<colcount-size ; i++) {
+			rc = sqlite3_bind_zeroblob(stmt, size+i, 0);
+			if (rc > 0) {
+				return rc;
+			}
+		}
+	}
+
+	for ( ; ; ) {
+		rc = sqlite3_blocking_step(db, stmt);
+		if (rc == SQLITE_ROW) {
+			continue;
+		} else if (rc == SQLITE_DONE) {
+			break;
+		} else {
+			return rc;
+		}
+	}
+
+	rc = sqlite3_reset(stmt);
+	if (rc > 0) {
+			return rc;
+	}
+
+	return 0;
+}
+
 */
 import "C"
 
@@ -377,6 +464,48 @@ func (c *Conn) Prepare(sql string, args ...interface{}) (s *Stmt, err error) {
 	var stmt *C.sqlite3_stmt
 	var cTail *C.char
 	rc := C.sqlite3_blocking_prepare_v2(c.db, cStr(zSQL), -1, &stmt, &cTail)
+	if rc != OK {
+		return nil, libErr(rc, c.db)
+	}
+
+	if stmt == nil {
+		return nil, nil
+	}
+
+	var tail string
+	if cTail != nil {
+		n := cStrOffset(zSQL, cTail)
+		if n >= 0 && n < len(sql) {
+			tail = sql[n:]
+		}
+	}
+
+	s = &Stmt{stmt: stmt, db: c.db, Tail: tail}
+
+	if len(args) > 0 {
+		if err = s.Bind(args...); err != nil {
+			s.Close()
+			return nil, err
+		}
+	}
+
+	return s, nil
+}
+
+// PreparePersistent compiles the first statement in sql. It calls prepare_v3 with
+// prepFlags set to SQLITE_PREPARE_PERSISTENT. Any remaining text after the
+// first statement is saved in s.Tail.  This function may return a nil stmt and
+// a nil error, if the sql string contains nothing to do.  For convenience,
+// this function can also bind arguments to the returned statement.  If an
+// error occurs during binding, the statement is closed/finalized and the error
+// is returned.
+// https://www.sqlite.org/c3ref/prepare.html
+func (c *Conn) PreparePersistent(sql string, args ...interface{}) (s *Stmt, err error) {
+	zSQL := sql + "\x00"
+
+	var stmt *C.sqlite3_stmt
+	var cTail *C.char
+	rc := C.sqlite3_blocking_prepare_v3_persistent(c.db, cStr(zSQL), -1, &stmt, &cTail)
 	if rc != OK {
 		return nil, libErr(rc, c.db)
 	}
@@ -816,6 +945,7 @@ func (s *Stmt) Exec(args ...interface{}) error {
 
 // ExecPrebound can be used to execute a prepared statement that has values
 // bound to it via BindString, BindEmptyString or BindNull.
+// It also calls a Reset allowing to re-use the existing Statement.
 func (s *Stmt) ExecPrebound() error {
 	if err := s.StepToCompletion(); err != nil {
 		s.Reset()
@@ -841,7 +971,38 @@ func (s *Stmt) BindString(v string, count int) error {
 	return nil
 }
 
-var empty = C.CString(``)
+// BindBytes is for binding []byte slices directly to a prepared statement.
+func (s *Stmt) BindBytes(v []byte, count int) error {
+	var rc C.int
+	rc = C.bind_blob(s.stmt,
+		C.int(count+1),
+		cBytes(v),
+		C.int(len(v)),
+		C.int(0),
+	)
+
+	if rc != OK {
+		return errStr(rc)
+	}
+
+	return nil
+}
+
+// BindMultibytes binds all data for a prepared statement in a single CGo call.
+// The incoming data needs to be set in continuous []byte accompanied by a []uint32
+// containing the lenghts of each individual record set. Colcount should be set to
+// the amount of columns announced in the prepared statement. The underlying function
+// will zeroblob pad the missing columns as needed.
+func (s *Stmt) BindMultibytes(v []byte, pos []uint32, size int, colcount int) error {
+	var rc C.int
+	rc = C.bind_multibytes(s.db, s.stmt, cBytes(v), (*C.uint32_t)(&pos[0]), C.int(size), C.int(colcount))
+
+	if rc != OK {
+		return errStr(rc)
+	}
+
+	return nil
+}
 
 // BindEmptyString can be used for prepared statements that only expect strings and
 // require an empty but non-NULL value.
