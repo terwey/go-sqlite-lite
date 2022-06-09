@@ -282,6 +282,10 @@ static int bind_multibytes(sqlite3 *db, sqlite3_stmt *stmt, const void *data, ui
 	int prev = 0;
 	int rc;
 	for(int i=0 ; i<size ; i++) {
+		if (i >= colcount) {
+			break;
+		}
+
 		if (pos[i] > 0) {
 			rc = sqlite3_bind_blob(stmt, i+1, data+prev, pos[i], SQLITE_STATIC);
 
@@ -289,7 +293,7 @@ static int bind_multibytes(sqlite3 *db, sqlite3_stmt *stmt, const void *data, ui
 				return rc;
 			}
 		} else {
-			rc = sqlite3_bind_zeroblob(stmt, i, 0);
+			rc = sqlite3_bind_zeroblob(stmt, i+1, 0);
 			if (rc > 0) {
 				return rc;
 			}
