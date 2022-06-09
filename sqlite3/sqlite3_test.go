@@ -1250,3 +1250,111 @@ func TestOutOfRange(T *testing.T) {
 		t.Fatal("Expected out of range error")
 	}
 }
+
+func TestMultibyte(T *testing.T) {
+
+	type TestData struct {
+		name     string
+		colnames []string
+		data     [][]byte
+	}
+
+	tests := []TestData{
+		{
+			name:     "one column",
+			colnames: []string{"a"},
+			data: [][]byte{
+				[]byte(`9200000030911137`),
+			},
+		},
+		{
+			name:     "one column followed by empty column",
+			colnames: []string{"a", "b"},
+			data: [][]byte{
+				[]byte(`9200000030911137`),
+				[]byte(``),
+			},
+		},
+		{
+			name:     "two columns followed by empty column",
+			colnames: []string{"a", "b", "c"},
+			data: [][]byte{
+				[]byte(`9200000030911137`),
+				[]byte(`foo`),
+				[]byte(``),
+			},
+		},
+		{
+			name:     "sample",
+			colnames: []string{"a", "b", "c"},
+			data: [][]byte{
+				[]byte(`one`),
+				[]byte(`25`),
+				[]byte(`01234`),
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		T.Run(tt.name, func(T *testing.T) {
+			t := begin(T)
+			defer t.skipRestIfFailed()
+
+			conn := t.open(":memory:")
+			defer t.close(conn)
+			create := fmt.Sprintf("CREATE TABLE x(%s TEXT)", strings.Join(tt.colnames, " TEXT,"))
+			t.exec(conn, create)
+
+			var v []byte
+			var pos []uint32
+			// cols := [][]byte{}
+
+			for _, col := range tt.data {
+				v = append(v, col...)
+				pos = append(pos, uint32(len(col)))
+			}
+
+			var q []string
+			for range tt.data {
+				q = append(q, "?")
+			}
+
+			insert := fmt.Sprintf("INSERT INTO x (%s) VALUES (%s)", strings.Join(tt.colnames, ","), strings.Join(q, ","))
+			s := t.prepare(conn, insert)
+			defer s.Close()
+			err := s.BindMultibytes(v, pos, len(v), len(tt.data))
+			if err != nil {
+				T.Fatal(err)
+			}
+
+			s = t.prepare(conn, "SELECT * FROM x")
+			defer t.close(s)
+
+			buf := make([]interface{}, len(tt.data))
+
+			for i := range buf {
+				v := ""
+				buf[i] = &v
+			}
+
+			t.step(s, true)
+			t.scan(s, buf...)
+
+			for i := range tt.data {
+				want := fmt.Sprintf("%s", tt.data[i])
+				got := ""
+				if buf[i] != nil {
+					if str, ok := buf[i].(*string); ok {
+						got = *str
+					}
+				}
+
+				if got != want {
+					t.Errorf("s.BindMultibytes() %s \nexpected: %s \ngot: %s", tt.name, want, got)
+				}
+			}
+
+			t.step(s, false)
+		})
+	}
+}
