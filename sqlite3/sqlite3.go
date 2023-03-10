@@ -41,6 +41,11 @@ package sqlite3
 #cgo CFLAGS: -DSQLITE_USE_ALLOCA=1
 #cgo CFLAGS: -DSQLITE_USE_URI=1
 #cgo CFLAGS: -DSQLITE_DEFAULT_PAGE_SIZE=32768
+// add shatree / sha3
+// can be added to your project by providing the option
+// CGO_CFLAGS="-DSQLITE_EXTRA_INIT=shathree_init -O2 -g"
+// or removing the following comment
+// #cgo CFLAGS: -DSQLITE_EXTRA_INIT=shathree_init
 #cgo linux LDFLAGS: -lm
 #cgo openbsd LDFLAGS: -lm
 
