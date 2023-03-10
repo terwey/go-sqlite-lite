@@ -245887,7 +245887,7 @@ int sqlite3_shathree_init(
   }
   return rc;
 }
-int core_init(const char* dummy)
+int shathree_init(const char* dummy)
 {
     int nErr = 0;
 
