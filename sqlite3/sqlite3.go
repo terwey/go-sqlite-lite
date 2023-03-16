@@ -68,6 +68,8 @@ package sqlite3
 #include <assert.h>
 #include <pthread.h>
 #include "sqlite3.h"
+// needed for calloc
+#include <stdlib.h>
 
 // cgo doesn't handle variadic functions.
 static void set_temp_dir(const char *path) {
@@ -284,6 +286,10 @@ int sqlite3_blocking_prepare_v3_persistent(
 // Pads zero columns for the missing columns in the byte array.
 // At the end of the call it steps through the statement to save another few calls.
 static int bind_multibytes(sqlite3 *db, sqlite3_stmt *stmt, const void *data, uint32_t *pos, int size, int colcount) {
+	// we need to initialize an empty string that we can pass to bind_text for empty columns
+	char *emptystring = NULL;
+	emptystring = (char*)calloc(1, sizeof(char));
+
 	int prev = 0;
 	int rc;
 	for(int i=0 ; i<size ; i++) {
@@ -291,14 +297,17 @@ static int bind_multibytes(sqlite3 *db, sqlite3_stmt *stmt, const void *data, ui
 			break;
 		}
 
+		// IMPORTANT: sqlite3_bind_blob and sqlite3_bind_zeroblob are faster
+		// 			  but that causes the affinity to become blob
+
 		if (pos[i] > 0) {
-			rc = sqlite3_bind_blob(stmt, i+1, data+prev, pos[i], SQLITE_STATIC);
+			rc = sqlite3_bind_text(stmt, i+1, data+prev, pos[i], SQLITE_STATIC);
 
 			if (rc > 0) {
 				return rc;
 			}
 		} else {
-			rc = sqlite3_bind_zeroblob(stmt, i+1, 0);
+			rc = sqlite3_bind_text(stmt, i+1, emptystring, 0, SQLITE_STATIC);
 			if (rc > 0) {
 				return rc;
 			}
@@ -308,7 +317,7 @@ static int bind_multibytes(sqlite3 *db, sqlite3_stmt *stmt, const void *data, ui
 
 	if (size < colcount) {
 		for(int i=0; i<colcount-size ; i++) {
-			rc = sqlite3_bind_zeroblob(stmt, size+i, 0);
+			rc = sqlite3_bind_text(stmt, size+1, emptystring, 0, SQLITE_STATIC);
 			if (rc > 0) {
 				return rc;
 			}
