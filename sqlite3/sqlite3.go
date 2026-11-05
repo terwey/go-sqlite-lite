@@ -317,7 +317,7 @@ static int bind_multibytes(sqlite3 *db, sqlite3_stmt *stmt, const void *data, ui
 
 	if (size < colcount) {
 		for(int i=0; i<colcount-size ; i++) {
-			rc = sqlite3_bind_text(stmt, size+i, emptystring, 0, SQLITE_STATIC);
+			rc = sqlite3_bind_text(stmt, size+i+1, emptystring, 0, SQLITE_STATIC);
 			if (rc > 0) {
 				return rc;
 			}
